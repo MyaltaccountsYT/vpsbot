@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DISCORD_BOT_TOKEN = "MTQ2NzMxMDQyNDg3Njc4MTY0Mg.GtlaUP.cGXnGy0PtsSsivNHMqP9nOmyw1ZIdfHZu1iY4"
-BOT_NAME = "Vortex Nodes"
-BOT_VERSION = "v0.0.2"
+BOT_NAME = "Vortex Core"
+BOT_VERSION = "v1.3"
 THUMBNAIL_IMAGE_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
 FOOTER_ICON_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
 MESSAGES_GIF_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
@@ -368,7 +368,7 @@ async def set_root_disk_size(container_name: str, size_gb: int):
 
     try:
         cmd = (
-            "apt-get update -y && apt-get install -y cloud-guest-utils || true; "
+            "echo nameserver 8.8.8.8 > /etc/resolv.conf && echo nameserver 1.1.1.1 >> /etc/resolv.conf && echo 'Acquire::ForceIPv4 true;' > /etc/apt/apt.conf.d/99force-ipv4 && apt-get update -y -o Acquire::ForceIPv4=true && apt-get install -y cloud-guest-utils || true; "
             "growpart /dev/sda 1 || true; "
             "if command -v resize2fs >/dev/null 2>&1; then resize2fs /dev/sda1 || true; fi; "
             "if command -v xfs_growfs >/dev/null 2>&1; then xfs_growfs / || true; fi"
@@ -1741,17 +1741,28 @@ async def manage_vps(ctx):
                     save_data()
                     await asyncio.sleep(3)
 
-                processing_embed = create_embed("🔐 Setting up SSH Access", f"Fixing DNS and installing tmate on `{container_name}`...", COLOR_INFO)
+                processing_embed = create_embed("🔐 Setting up SSH Access", f"Fixing network and installing tmate on `{container_name}`...", COLOR_INFO)
                 message = await ctx.send(embed=processing_embed)
 
-                dns_fix_cmd = "echo 'nameserver 8.8.8.8' > /etc/resolv.conf && echo 'nameserver 1.1.1.1' >> /etc/resolv.conf"
+                net_fix_cmd = (
+                    "echo 'nameserver 8.8.8.8' > /etc/resolv.conf && "
+                    "echo 'nameserver 1.1.1.1' >> /etc/resolv.conf && "
+                    "echo 'nameserver 8.8.4.4' >> /etc/resolv.conf && "
+                    "sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 || true && "
+                    "sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 || true && "
+                    "mkdir -p /etc/apt/apt.conf.d && "
+                    "echo 'Acquire::ForceIPv4 true;' > /etc/apt/apt.conf.d/99force-ipv4"
+                )
                 try:
-                    await execute_lxc(f"lxc exec {container_name} -- bash -c '{dns_fix_cmd}'", timeout=10)
-                except:
-                    pass
+                    await execute_lxc(f'lxc exec {container_name} -- bash -c "{net_fix_cmd}"', timeout=15)
+                except Exception as net_err:
+                    logger.warning(f"Network fix partially failed (non-fatal): {net_err}")
 
-                install_cmd = "apt-get update -qq && apt-get install -y tmate"
-                await execute_lxc(f"lxc exec {container_name} -- bash -c '{install_cmd}'", timeout=180)
+                processing_embed.description = "📦 Installing tmate..."
+                await message.edit(embed=processing_embed)
+
+                install_cmd = "DEBIAN_FRONTEND=noninteractive apt-get update -qq -o Acquire::ForceIPv4=true && apt-get install -y -o Acquire::ForceIPv4=true tmate"
+                await execute_lxc(f'lxc exec {container_name} -- bash -c "{install_cmd}"', timeout=300)
 
                 processing_embed.description = "Generating SSH session..."
                 await message.edit(embed=processing_embed)
@@ -1979,7 +1990,7 @@ async def tailscale_me(ctx):
         message = await ctx.send(embed=processing_embed)
 
         try:
-            update_cmd = "apt-get update && apt-get install -y curl gnupg lsb-release"
+            update_cmd = "echo nameserver 8.8.8.8 > /etc/resolv.conf && echo nameserver 1.1.1.1 >> /etc/resolv.conf && echo 'Acquire::ForceIPv4 true;' > /etc/apt/apt.conf.d/99force-ipv4 && DEBIAN_FRONTEND=noninteractive apt-get update -qq -o Acquire::ForceIPv4=true && apt-get install -y -o Acquire::ForceIPv4=true curl gnupg lsb-release"
             await execute_lxc(f"lxc exec {container_name} -- bash -c '{update_cmd}'", timeout=120)
 
             install_cmd = "curl -fsSL https://tailscale.com/install.sh | sh"
