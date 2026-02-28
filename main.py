@@ -16,14 +16,32 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCORD_BOT_TOKEN = "MTQ2NzMxMDQyNDg3Njc4MTY0Mg.G_zfnl.Kp78Sc_h7ka-b5xVsbG1eiCz3w-m-imlv2QR"
+DISCORD_BOT_TOKEN = "MTQ2NzMxMDQyNDg3Njc4MTY0Mg.GtlaUP.cGXnGy0PtsSsivNHMqP9nOmyw1ZIdfHZu1iY4"
 BOT_NAME = "Vortex Nodes"
 BOT_VERSION = "v0.0.2"
 THUMBNAIL_IMAGE_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
 FOOTER_ICON_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
 MESSAGES_GIF_URL = "https://cdn.discordapp.com/attachments/1467306702742229100/1467308441017123122/54483db9-3607-464c-b6ec-806f20f6e7a1.png?ex=699500f9&is=6993af79&hm=82f1ded821fe499d3ae9b88791dee513c4679979d7858303f23d31e7cc7e0f0b"
 
-DEFAULT_STORAGE_POOL = "default"
+DEFAULT_STORAGE_POOL = "local"
+
+def detect_storage_pool():
+    try:
+        result = subprocess.run(
+            ['lxc', 'storage', 'list', '--format', 'json'],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            pools = json.loads(result.stdout)
+            if pools:
+                names = [p.get('name', '') for p in pools]
+                for preferred in ['local', 'default', 'dir', 'zfs', 'btrfs', 'lvm']:
+                    if preferred in names:
+                        return preferred
+                return names[0]
+    except Exception as e:
+        logging.warning(f"Could not auto-detect storage pool: {e}")
+    return "local"
 
 COLOR_PRIMARY = 0x5dade2
 COLOR_SUCCESS = 0x3498db
@@ -50,42 +68,42 @@ TRIAL_VPS_DURATION_DAYS = 3
 OS_OPTIONS = {
     "ubuntu2004": {
         "label": "Ubuntu 20.04 LTS (Focal Fossa)",
-        "image": "images:ubuntu/20.04",
+        "image": "ubuntu:20.04",
         "emoji": "🟠",
         "description": "Long-term support, stable & widely supported",
         "arch": "x86_64"
     },
     "ubuntu2204": {
         "label": "Ubuntu 22.04 LTS (Jammy Jellyfish)",
-        "image": "images:ubuntu/22.04",
+        "image": "ubuntu:22.04",
         "emoji": "🟠",
         "description": "Latest LTS, modern packages & security",
         "arch": "x86_64"
     },
     "ubuntu2404": {
         "label": "Ubuntu 24.04 LTS (Noble Numbat)",
-        "image": "images:ubuntu/24.04",
+        "image": "ubuntu:24.04",
         "emoji": "🟠",
         "description": "Newest LTS release with cutting-edge features",
         "arch": "x86_64"
     },
     "debian13": {
         "label": "Debian 13 (Trixie)",
-        "image": "images:debian/13",
+        "image": "images:debian/trixie",
         "emoji": "🔴",
         "description": "Testing branch, latest Debian packages",
         "arch": "x86_64"
     },
     "debian12": {
         "label": "Debian 12 (Bookworm)",
-        "image": "images:debian/12",
+        "image": "images:debian/bookworm",
         "emoji": "🔴",
         "description": "Current stable Debian, highly reliable",
         "arch": "x86_64"
     },
     "debian11": {
         "label": "Debian 11 (Bullseye)",
-        "image": "images:debian/11",
+        "image": "images:debian/bullseye",
         "emoji": "🔴",
         "description": "Older stable Debian, max compatibility",
         "arch": "x86_64"
@@ -157,6 +175,9 @@ OS_OPTIONS = {
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('vps_bot')
+
+DEFAULT_STORAGE_POOL = detect_storage_pool()
+logger.info(f"Auto-detected storage pool: {DEFAULT_STORAGE_POOL}")
 
 if not shutil.which("lxc"):
     logger.error("LXC command not found.")
@@ -360,20 +381,28 @@ async def core_create_container(container_name: str, ram_gb: int, cpu: int, stor
     if storage_pool is None:
         storage_pool = DEFAULT_STORAGE_POOL
     if os_image is None:
-        os_image = "images:debian/12"
+        os_image = "images:debian/bookworm"
 
     try:
         ram_mb = int(ram_gb) * 1024
+        storage_arg = f"-s {storage_pool}" if storage_pool else ""
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        launched = False
+        for attempt in range(3):
             try:
-                await execute_lxc(f"lxc launch {os_image} {container_name} --config limits.memory={ram_mb}MB --config limits.cpu={cpu} -s {storage_pool}", timeout=600)
+                cmd = f"lxc launch {os_image} {container_name} --config limits.memory={ram_mb}MB --config limits.cpu={cpu} {storage_arg}".strip()
+                await execute_lxc(cmd, timeout=600)
+                launched = True
                 break
             except Exception as e:
-                if attempt == max_retries - 1:
+                err_str = str(e).lower()
+                if storage_arg and ('storage pool' in err_str or 'storage' in err_str):
+                    logger.warning(f"Storage pool '{storage_pool}' failed ({e}), retrying without -s flag")
+                    storage_arg = ""
+                    continue
+                if attempt == 2:
                     raise
-                logger.warning(f"Attempt {attempt + 1} failed, retrying... Error: {e}")
+                logger.warning(f"Launch attempt {attempt + 1} failed, retrying in 5s: {e}")
                 await asyncio.sleep(5)
 
         await set_root_disk_size(container_name, storage_gb)
@@ -2685,6 +2714,17 @@ async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{BOT_NAME} | .help"))
     logger.info("Bot is ready!")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            'lxc', 'remote', 'list', '--format', 'json',
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        out, _ = await proc.communicate()
+        remotes = json.loads(out.decode())
+        remote_names = list(remotes.keys()) if isinstance(remotes, dict) else [r.get('name') for r in remotes]
+        logger.info(f"LXC remotes available: {remote_names}")
+    except Exception as e:
+        logger.warning(f"Could not list LXC remotes: {e}")
 
 @bot.event
 async def on_command_error(ctx, error):
