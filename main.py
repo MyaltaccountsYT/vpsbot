@@ -1741,30 +1741,56 @@ async def manage_vps(ctx):
                     save_data()
                     await asyncio.sleep(3)
 
-                processing_embed = create_embed("🔐 Setting up SSH Access", f"Fixing network and installing tmate on `{container_name}`...", COLOR_INFO)
+                processing_embed = create_embed("🔐 Setting up SSH Access", f"Installing tmate on `{container_name}`...", COLOR_INFO)
                 message = await ctx.send(embed=processing_embed)
 
+                # Step 1: Fix DNS + disable IPv6 + force IPv4 for apt
                 net_fix_cmd = (
                     "echo 'nameserver 8.8.8.8' > /etc/resolv.conf && "
                     "echo 'nameserver 1.1.1.1' >> /etc/resolv.conf && "
-                    "echo 'nameserver 8.8.4.4' >> /etc/resolv.conf && "
-                    "sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 || true && "
-                    "sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 || true && "
+                    "sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1 || true && "
+                    "sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1 || true && "
                     "mkdir -p /etc/apt/apt.conf.d && "
                     "echo 'Acquire::ForceIPv4 true;' > /etc/apt/apt.conf.d/99force-ipv4"
                 )
                 try:
                     await execute_lxc(f'lxc exec {container_name} -- bash -c "{net_fix_cmd}"', timeout=15)
                 except Exception as net_err:
-                    logger.warning(f"Network fix partially failed (non-fatal): {net_err}")
+                    logger.warning(f"Network fix partially failed: {net_err}")
 
-                processing_embed.description = "📦 Installing tmate..."
+                # Step 2: Try apt first, fall back to direct binary download
+                processing_embed.description = "📦 Installing tmate (trying apt)..."
                 await message.edit(embed=processing_embed)
 
-                install_cmd = "DEBIAN_FRONTEND=noninteractive apt-get update -qq -o Acquire::ForceIPv4=true && apt-get install -y -o Acquire::ForceIPv4=true tmate"
-                await execute_lxc(f'lxc exec {container_name} -- bash -c "{install_cmd}"', timeout=300)
+                tmate_installed = False
 
-                processing_embed.description = "Generating SSH session..."
+                try:
+                    install_cmd = "DEBIAN_FRONTEND=noninteractive apt-get update -qq -o Acquire::ForceIPv4=true && apt-get install -y -o Acquire::ForceIPv4=true tmate"
+                    await execute_lxc(f'lxc exec {container_name} -- bash -c "{install_cmd}"', timeout=240)
+                    tmate_installed = True
+                except Exception as apt_err:
+                    logger.warning(f"apt install tmate failed, trying binary download: {apt_err}")
+
+                if not tmate_installed:
+                    processing_embed.description = "📦 apt failed — downloading tmate binary directly..."
+                    await message.edit(embed=processing_embed)
+                    try:
+                        # Download latest tmate static binary directly from GitHub releases
+                        bin_cmd = (
+                            "arch=$(uname -m) && "
+                            "if [ \"$arch\" = \"x86_64\" ]; then TMATE_URL=\"https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz\"; "
+                            "elif [ \"$arch\" = \"aarch64\" ]; then TMATE_URL=\"https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-arm64v8.tar.xz\"; "
+                            "else TMATE_URL=\"https://github.com/tmate-io/tmate/releases/download/2.4.0/tmate-2.4.0-static-linux-amd64.tar.xz\"; fi && "
+                            "cd /tmp && curl -fsSL \"$TMATE_URL\" -o tmate.tar.xz && "
+                            "tar -xf tmate.tar.xz --strip-components=1 && "
+                            "mv tmate /usr/local/bin/tmate && chmod +x /usr/local/bin/tmate"
+                        )
+                        await execute_lxc(f'lxc exec {container_name} -- bash -c "{bin_cmd}"', timeout=120)
+                        tmate_installed = True
+                    except Exception as bin_err:
+                        raise Exception(f"Both apt and binary install failed. apt: {apt_err} | binary: {bin_err}")
+
+                processing_embed.description = "🔗 Generating SSH session..."
                 await message.edit(embed=processing_embed)
 
                 tmate_cmd = "tmate -F 2>&1 | grep -m1 'ssh session:' || tmate -F 2>&1 | head -20"
